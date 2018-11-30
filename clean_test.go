@@ -37,7 +37,7 @@ var (
 )
 
 func TestCleanSVGString(t *testing.T) {
-	result := CleanSVGString(inSVG)
+	result := CleanSVGStringBlack(inSVG)
 
 	if result != outSVG {
 		t.Log(len(result), len(outSVG))
@@ -57,7 +57,7 @@ func TestCleanElementTree(t *testing.T) {
 	}
 
 	//e := (*Element)(&x)
-	CleanElementTree(&e)
+	CleanElementTreeBlack(&e)
 
 	b, err := xml.MarshalIndent(e, "", "  ")
 	if err != nil {
@@ -66,6 +66,15 @@ func TestCleanElementTree(t *testing.T) {
 	}
 
 	result := svgHeader + string(b)
+
+	if result != outSVG {
+		t.Log(len(result), len(outSVG))
+		t.Errorf("wrong:\n%s\n\n%s", result, outSVG)
+	}
+}
+
+func TestCleanSVGStringWhite(t *testing.T) {
+	result := CleanSVGStringWhite(inSVG)
 
 	if result != outSVG {
 		t.Log(len(result), len(outSVG))

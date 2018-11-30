@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/chappjc/svgclean/whitelist"
 )
 
 const svgHeader = `<?xml version="1.0" standalone="no"?>
@@ -34,47 +36,144 @@ type Element struct {
 
 	// Elements is a pointer to a slice of child elements. It is a pointer to
 	// avoid marshaling an empty <Elements></Elements> for a slice with no
-	// non-nil pointer..
+	// non-nil pointer.
 	Elements *elements `xml:",any"`
 }
 
-func CleanSVGString(svg string) string {
+type elementsPromisc []*ElementPromisc
+
+// ElementPromisc is like Element, except that it does not capture anything by
+// name; all tags and attributes to to the Elements and Attrs slices. This
+// facilitates the whitelist approach.
+type ElementPromisc struct {
+	XMLName  xml.Name
+	Attrs    []*xml.Attr `xml:",any,attr"`
+	Comment  string      `xml:",comment"`
+	CharData string      `xml:",chardata"`
+	//CDATA string `xml:",cdata"`
+
+	// Elements is a pointer to a slice of child elements. It is a pointer to
+	// avoid marshaling an empty <Elements></Elements> for a slice with no
+	// non-nil pointer.
+	Elements *elementsPromisc `xml:",any"`
+}
+
+func CleanSVGStringBlack(svg string) string {
+	return cleanSVGString(svg, true)
+}
+
+func CleanSVGStringWhite(svg string) string {
+	return cleanSVGString(svg, false)
+}
+
+func cleanSVGString(svg string, blacklist bool) string {
 	buf := bytes.NewBuffer([]byte(svg))
 	dec := xml.NewDecoder(buf)
 
-	var e Element
-	err := dec.Decode(&e)
-	if err != nil {
-		fmt.Printf("failed to unmarshal source svg: %v", err)
-		os.Exit(1)
-	}
+	var b []byte
 
 	//e := (*Element)(&x)
-	CleanElementTree(&e)
-
-	b, err := xml.MarshalIndent(e, "", "  ")
-	if err != nil {
-		fmt.Printf("failed to marshal cleaned svg: %v", err)
-		os.Exit(1)
+	if blacklist {
+		var e Element
+		err := dec.Decode(&e)
+		if err != nil {
+			fmt.Printf("failed to unmarshal source svg: %v", err)
+			os.Exit(1)
+		}
+		CleanElementTreeBlack(&e)
+		b, err = xml.MarshalIndent(e, "", "  ")
+		if err != nil {
+			fmt.Printf("failed to marshal cleaned svg: %v", err)
+			os.Exit(1)
+		}
+	} else {
+		var e ElementPromisc
+		err := dec.Decode(&e)
+		if err != nil {
+			fmt.Printf("failed to unmarshal source svg: %v", err)
+			os.Exit(1)
+		}
+		CleanElementTreeWhite(&e)
+		b, err = xml.MarshalIndent(e, "", "  ")
+		if err != nil {
+			fmt.Printf("failed to marshal cleaned svg: %v", err)
+			os.Exit(1)
+		}
 	}
 
 	return svgHeader + string(b)
 }
 
-// CleanElementTree recursively processes the given element and all of its
-// children via CleanElements.
-func CleanElementTree(e *Element) {
-	CleanElements(elements{e})
+// CleanElementTreeBlack recursively processes the given element and all of its
+// children via CleanElementsBlackList.
+func CleanElementTreeBlack(e *Element) {
+	CleanElementsBlackList(elements{e})
 }
 
-// CleanElements recursively processes the given elements and all of their
-// children. The following are removed: <a> and <script> tags, href attributes,
-// and both leading/trailing white space and CR/LF characters from character
-// data outside of <p>, <span>, and <div> tags.
-func CleanElements(Elements elements) {
-	okFun := func(e *Element) bool {
+// CleanElementTreeWhite recursively processes the given element and all of its
+// children via CleanElementsWhiteList.
+func CleanElementTreeWhite(e *ElementPromisc) {
+	CleanElementsWhiteList(elementsPromisc{e})
+}
+
+func CleanElementsWhiteList(Elements elementsPromisc) {
+	okFun := func(e *ElementPromisc) bool {
 		if e == nil {
 			return false
+		}
+
+		// Check tag
+		if !whitelist.IsAllowedTag(e.XMLName.Local) {
+			fmt.Printf("Removing disallowed tag \"%s\".\n", e.XMLName.Local)
+			return false // FilterElementsWhite will set this element to nil
+		}
+
+		// Check all attributes
+		var okAttrs []*xml.Attr
+		for _, a := range e.Attrs {
+			// Allow only whitelisted attributes.
+			if !whitelist.IsAllowedAttribute(a.Name.Local) {
+				fmt.Printf("Removing disallowed attribute \"%s\".\n",
+					a.Name.Local)
+				continue
+			}
+
+			// Filter values too.
+			if strings.Contains(a.Value, "javascript") {
+				fmt.Printf("Removing attribute \"%s\" with possible javascript.\n",
+					a.Name.Local)
+				continue
+			}
+			okAttrs = append(okAttrs, a)
+		}
+		e.Attrs = okAttrs
+
+		// Remove newlines and trailing/leading spaces from character data.
+		switch e.XMLName.Local {
+		case "p", "span", "div":
+		default:
+			r := strings.NewReplacer("\n", "", "\r", "")
+			e.CharData = strings.TrimSpace(r.Replace(e.CharData))
+		}
+
+		// Remove redundant xmlns attribute, which will be retained by Attrs.
+		e.XMLName.Space = ""
+
+		// signal to keep this cleaned element
+		return true
+	}
+
+	FilterElementsWhite(Elements, okFun)
+}
+
+// CleanElementsBlackListed recursively processes the given elements and all of
+// their children. The following are removed: <a> and <script> tags, href
+// attributes, and both leading/trailing white space and CR/LF characters from
+// character data outside of <p>, <span>, and <div> tags.
+func CleanElementsBlackList(Elements elements) {
+	okFun := func(e *Element) {
+		if e == nil {
+			return
 		}
 
 		// Eliminate all <a> elements and their children.
@@ -118,21 +217,32 @@ func CleanElements(Elements elements) {
 
 		// Remove redundant xmlns attribute, which will be retained by Attrs.
 		e.XMLName.Space = ""
-
-		// Only OK to process children if slice has elements.
-		return e.Elements != nil && len(*e.Elements) > 0
 	}
 
-	WalkElements(Elements, okFun)
+	FilterElementsBlack(Elements, okFun)
 }
 
-// WalkElements recursively processes the *Element slice with the provided
-// function. Processing is recursive in that the child elements are also
-// processed with WalkElements, but only if the function returns true.
-func WalkElements(Elements elements, okFun func(*Element) bool) {
+// FilterElementsBlack recursively processes the *Element slice with the
+// provided function. Processing is recursive in that the child elements are
+// also processed with FilterElementsBlack, but only if the function returns true.
+func FilterElementsBlack(Elements elements, cleanFun func(*Element)) {
 	for _, e := range Elements {
+		cleanFun(e)
+		if e != nil && e.Elements != nil {
+			FilterElementsBlack(*e.Elements, cleanFun)
+		}
+	}
+}
+
+func FilterElementsWhite(Elements elementsPromisc, okFun func(*ElementPromisc) bool) {
+	for i, e := range Elements {
 		if okFun(e) {
-			WalkElements(*e.Elements, okFun)
+			if e.Elements != nil {
+				FilterElementsWhite(*e.Elements, okFun)
+			}
+		} else {
+			// clean up
+			Elements[i] = nil
 		}
 	}
 }
