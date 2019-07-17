@@ -55,7 +55,7 @@ func main() {
 
 	var outSVG string
 	if *black {
-		outSVG = svgclean.CleanSVGStringWhite(inSVG)
+		outSVG = svgclean.CleanSVGStringBlack(inSVG)
 	} else {
 		outSVG = svgclean.CleanSVGStringWhite(inSVG)
 	}
